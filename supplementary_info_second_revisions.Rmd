@@ -1,0 +1,1604 @@
+---
+title: Exploring the Working Range of Automated Standard Dilution Analysis of Nutrient
+  Elements in Foods by Inductively Coupled Plasma Optical Emission Spectrometry
+author: "Jake A. Carter*, Patrick J. Gray, Todor I. Todorov"
+date: '2023-02-03'
+output:
+  word_document:
+    highlight: NULL
+    fig_width: 5
+    fig_height: 3.33
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      eval = FALSE)
+```
+
+Prepare working environment
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(ggpmisc)
+library(readxl)
+library(broom)
+library(viridis)
+library(scales)
+library(ggbeeswarm)
+library(patchwork)
+library(ggforce)
+library(gt)
+
+my.formula <- y ~ x
+
+theme_master <- function(base_size=14) {
+  library(grid)
+  (theme_bw(base_size = base_size)+
+      theme(text=element_text(color="black"),
+            axis.title=element_text(size = rel(1.3)),
+            axis.text=element_text(size = rel(0.8), color = "black"),
+            axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0.5),
+            legend.background=element_rect(fill="transparent"),
+            legend.key.size = unit(1, 'lines'),
+            strip.text = element_text(size = rel(0.8), color = "black"),
+            panel.border=element_rect(color="black",linewidth=1)
+      ))
+}
+
+theme_set(theme_master())
+```
+
+Single wavelengths for elements of interest
+```{r}
+single_line <-
+  c(
+    "588.995",
+    "766.491",
+    "279.800",
+    "315.887",
+    "257.610",
+    "238.204",
+    "327.395",
+    "202.548",
+    "213.618",
+    "181.972"
+  )
+```
+
+Reading in data
+
+Reading in supplemental info containing data from reference material certificate of analysis
+```{r message=FALSE}
+ref_material_info <-
+  c("NIST_3233_info",
+   "NIST_1845a_info",
+   "NIST_1849a_info",
+   "NIST_1549a_info",
+   "NIST_1577c_info",
+   "NIST_1566b_info",
+   "NIST_1568b_info",
+   "FDA_cocoa_info",
+   "3290_info",
+   "NMIJ_7405b_info",
+   "NRC_dolt-4_info",
+   "NIST_2976_info",
+   "NRC_dorm-4_info")
+
+RM_info <-
+  lst()
+
+RM_info <- lapply(seq_along(ref_material_info), function(x) {
+  RM_info[[x]] <-
+    read_excel("C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/SLV/summary/SLV_summary.xlsx",
+               sheet = ref_material_info[x]) %>%
+  dplyr::mutate(QC = "Reference material",
+                ref_material = ref_material_info[x],
+                ref_material = str_replace(ref_material, "_info", ""),
+                ref_material = str_replace(ref_material, "NIST_1845a", "1845a"),
+                ref_material = str_replace(ref_material, "NIST_1549a", "1549a"),
+                ref_material = str_replace(ref_material, "NIST_1849a", "1849a"),
+                ref_material = str_replace(ref_material, "NIST_3233", "3233"),
+                ref_material = str_replace(ref_material, "NIST_1577c", "1577c"),
+                ref_material = str_replace(ref_material, "NIST_1566b", "1566b"),
+                ref_material = str_replace(ref_material, "NIST_1568b", "1568b"),
+                ref_material = str_replace(ref_material, "NIST_2976", "2976"),
+                ref_material = str_replace(ref_material, "NRC_dolt-4", "dolt-4"),
+                ref_material = str_replace(ref_material, "NRC_dorm-4", "dorm-4"),
+                ref_material = str_replace(ref_material, "FDA_cocoa", "FDA cocoa"))
+}
+)
+
+names(RM_info) <- ref_material_info
+
+RM_info <-
+  dplyr::bind_rows(RM_info) %>%
+  dplyr::rename(certificate_value = certificate_value_mg_kg,
+                sample = ref_material) %>%
+  dplyr::mutate(QC = "Reference Material")
+```
+
+Read in dilution data
+```{r}
+dilutions <-
+  read_excel("C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/2022/June/20220606/SDA.xlsx",
+             sheet = "R") %>%
+  dplyr::mutate(replicate = as.character(replicate)) %>%
+  tidyr::pivot_longer(cols = Al:Zn, values_to = "c_std", names_to = "symbol") %>%
+  dplyr::mutate(date = as.character(date))
+```
+
+Dry mass conversion factors for reference material analysis
+```{r}
+dry_mass <-
+  read_excel("C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/2022/June/20220606/SDA.xlsx",
+             sheet = "dry_mass") %>%
+  dplyr::rename(sample = ref_mat) %>%
+  dplyr::mutate(date = lubridate::ymd(date))
+```
+
+Read in fortification dilutions
+Spike conc. is $\frac{C_{s}M_{s}}{M_{x}}$
+```{r}
+FAPs <-
+  read_excel("C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/2022/June/20220606/SDA.xlsx",
+             sheet = "FAPs") %>%
+  tidyr::pivot_longer(cols = As:Zn, names_to = "symbol", values_to = "spike_conc") %>%
+  dplyr::mutate(replicate = as.character(replicate),
+                date = as.character(date))
+```
+
+Read in data
+
+In this experiment, Lu is in solution one (S1) and is internal standard 1 (IS1). In is in solution two (S2) and is internal standard 2 (IS2).
+```{r}
+files = list.files(path = "C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/2022/June/20220606",pattern="*.csv")
+
+data <-
+  readr::read_csv(paste("C:/Users/Jake.Carter/OneDrive - FDA/HomeDrive/Data/ICP OES/2022/June/20220606/", files[1], sep = ""),
+                  skip = 6) %>%
+  janitor::clean_names() %>%
+  dplyr::select(label, element, element_label, date_time, starts_with("intensity_replicate")) %>%
+  tidyr::pivot_longer(cols = intensity_replicate_1:intensity_replicate_100,
+                      values_to = "intensity",
+                      names_to = "intensity_replicate") %>%
+  dplyr::mutate(intensity_replicate = str_remove(intensity_replicate, "intensity_replicate_"),
+                element = str_replace(element, " ", "."),
+                label = str_replace(label, "d-blk", "blk"),
+                label = str_replace(label, "fda_cocoa_cp_35", "FDA cocoa"),
+                date = str_extract(label, "2022-03-09|2022-04-07|2022-02-01"),
+                label = str_remove(label, "2022-03-09-|2022-04-07-|2022-02-01-"),
+                sample = str_remove(label, "-10$|-1$|-2$|-3$|-4$|-5$|-6$|-7$|-8$|-9$"),
+    replicate = str_extract(label, "1$|2$|3$|4$|5$|6$|7$|8$|9$|10$"),
+    FAP = str_extract(label, "FAP1|FAP2|FAP3"),
+    FAP = if_else(is.na(FAP),
+                  "Not an FAP",
+                  FAP),
+    sample = str_remove(sample, "-FAP1|-FAP2|-FAP3"),
+    QC = if_else(FAP %in% c("FAP1", "FAP2", "FAP3"),
+                 "FAP",
+                 if_else(sample %in% RM_info$sample,
+                 "Reference Material",
+                 if_else(sample == "blk",
+                         "blank",
+                         "UAP")
+                 )
+                 )
+    ) %>%
+  dplyr::rename(symbol = element_label) %>%
+  dplyr::group_by(element, sample, date_time, replicate) %>%
+  dplyr::mutate(normalized = intensity/max(intensity)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(str_detect(label, "rinse", negate = TRUE))
+```
+
+```{r}
+samples <-
+  unique(data$label)
+```
+
+```{r}
+lines <-
+  unique(data$element)
+```
+
+We plot raw data and generate linear regressions. Model parameters will be used to determine solution concentrations according to automatic standard dilution analysis
+```{r dpi = 300}
+sda1 <-
+  data %>%
+  dplyr::select(-intensity) %>%
+  dplyr::filter(element %in% c("Zn.202.548", "In.325.609", "Lu.261.541"),
+                str_detect(label, "1577c", negate = FALSE)) %>%
+  dplyr::mutate(replicate = paste("Rep. #", replicate, sep = ""),
+                replicate = fct_inorder(replicate),
+                dig_label = str_replace(date, "2022-02-01", "Dig. 1"),
+                dig_label = str_replace(dig_label, "2022-03-09", "Dig. 2"),
+                dig_label = str_replace(dig_label, "2022-04-07", "Dig. 3"),
+                element = str_replace(element, "In.", "In "),
+                element = str_replace(element, "Lu.", "Lu "),
+                element = str_replace(element, "Zn.", "Zn "),
+                element = paste(element, "(nm)")) %>%
+  ggplot(aes(x = as.numeric(intensity_replicate), y = normalized, fill = element, shape = element)) +
+  geom_point(size = 1,
+             stroke = 0.2) +
+  scale_shape_manual(values = c(21,22,23)) +
+  guides(fill = guide_legend(override.aes = list(size=2))) +
+  scale_fill_viridis_d(option = "turbo", alpha = 0.5) +
+  labs(y = "Normalized Intensity",
+       x = "Intensity Replicate",
+       subtitle = "(a)",
+       fill = NULL,
+       shape = NULL) +
+  facet_grid(dig_label~replicate) +
+  theme_master(base_size = 7.5) +
+  theme(legend.position = "right",
+        panel.grid = element_blank())
+
+sda1
+```
+
+```{r dpi = 300}
+sda2 <-
+  data %>%
+  dplyr::select(-normalized, -symbol) %>%
+  dplyr::filter(element %in% c("In.325.609", "Lu.261.541")) %>%
+  dplyr::mutate(element = str_replace(element, "In.", "In "),
+                element = str_replace(element, "Lu.", "Lu "),
+                element = str_replace(element, "Zn.", "Zn "),
+                element = paste(element, "(nm)")) %>%
+  tidyr::pivot_wider(names_from = element, values_from = intensity) %>%
+  dplyr::filter(str_detect(label, "1577c")) %>%
+  dplyr::mutate(replicate = paste("Rep. #", replicate, sep = ""),
+                replicate = fct_inorder(replicate),
+                dig_label = str_replace(date, "2022-02-01", "Dig. 1"),
+                dig_label = str_replace(dig_label, "2022-03-09", "Dig. 2"),
+                dig_label = str_replace(dig_label, "2022-04-07", "Dig. 3")) %>%
+  ggplot(aes(x = `In 325.609 (nm)`/10^4, y = `Lu 261.541 (nm)`/10^4)) +
+  geom_point(size = 0.75,
+             stroke = 0.2,
+             alpha = 0.8,
+             shape = 21,
+             fill = "gray") +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 0.3,
+              formula = my.formula,
+              color = plasma(1, alpha = 0.75, direction = -1, end = 0.8)) +
+  stat_poly_eq(formula = my.formula,
+               aes(label = paste(..eq.label.., sep = "~~~")),
+               size = rel(1.6),
+               label.y = c(rep(0.95, 27)),
+               label.x = c(rep(0.95, 27)),
+               parse = TRUE) +
+  labs(subtitle = "(b)",
+       y = expression(paste("Lu 261.541 (nm) / ", 10^4)),
+       x = expression(paste("In 325.609 (nm) / ", 10^4))) +
+  theme(legend.position = "none") +
+  facet_grid(dig_label~replicate) +
+  theme_master(base_size = 7.5) +
+  theme(panel.grid = element_blank())
+
+sda2
+```
+
+```{r dpi = 300}
+sda3 <-
+  data %>%
+  dplyr::select(-normalized, -symbol) %>%
+  tidyr::pivot_wider(names_from = element, values_from = intensity) %>%
+  tidyr::pivot_longer(cols = -starts_with(c("intensity_replicate",
+                                            "sample",
+                                            "date_time",
+                                            "FAP",
+                                            "QC",
+                                            "replicate",
+                                            "date",
+                                            "In",
+                                            "Lu",
+                                            "label")), names_to = "element", values_to = "intensity") %>%
+  dplyr::filter(element == "Zn.202.548") %>%
+  dplyr::filter(str_detect(label, "1577c")) %>%
+  dplyr::mutate(replicate = paste("Rep. #", replicate, sep = ""),
+                replicate = fct_inorder(replicate),
+                dig_label = str_replace(date, "2022-02-01", "Dig. 1"),
+                dig_label = str_replace(dig_label, "2022-03-09", "Dig. 2"),
+                dig_label = str_replace(dig_label, "2022-04-07", "Dig. 3")) %>%
+  ggplot(aes(x = Lu.261.541/10^4, y = intensity/10^4)) +
+  geom_point(size = 0.75,
+             stroke = 0.2,
+             alpha = 0.8,
+             shape = 21,
+             fill = "gray") +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              formula = my.formula,
+              linewidth = 0.3,
+              color = plasma(1, alpha = 0.75, direction = -1, end = 0.8)) +
+  stat_poly_eq(formula = my.formula,
+               aes(label = paste(..eq.label.., sep = "~~~")),
+               size = rel(1.6),
+               label.y = c(rep(0.95, 24)),
+               parse = TRUE) +
+  labs(y = expression(paste("Zn 202.548 (nm) / ", 10^4)),
+       x = expression(paste("Lu 261.541 (nm) / ", 10^4)),
+       subtitle = "(c)") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+  facet_grid(dig_label~replicate,
+             scales = "free") +
+  theme_master(base_size = 7.5) +
+  theme(panel.grid = element_blank())
+
+sda3
+```
+
+Code for data vis
+```{r dpi = 300}
+sda1/(sda2 + sda3) 
+```
+
+Determining automatic SDA parameters
+
+From the text: Solution concentrations were determined according to eq. 1,^1^ where $C_A^{soln}$, $C_A^{std}$, and $S_I^{max}$, is the concentration of the analyte in the sample solution after digestion, the concentration of the analyte in the standard solution, and the maximum signal of IS1, respectively. The intercept and slope in eq. 1 were determined from the linear regression model generated from plotting the signal of the analyte against the signal of IS1. $S_I^{max}$ was determined from plotting the signal of IS1 against the signal of IS2, fitting a linear regression model, and generating the y-intercept.^1^
+
+eq. 1: $C_A^{soln} = \frac{intercept}{slope}*\frac{C_A^{std}}{S_I^{max}}$
+
+Now we compute linear regression parameters (e.g. intercept_1, intercept_2, and slope) in batch. Here, intercept_2 is the same as $S_I^{max}$
+```{r}
+line_1_metrics <-
+  data %>%
+  dplyr::select(-normalized, -symbol) %>%
+  tidyr::pivot_wider(names_from = element, values_from = intensity) %>%
+  tidyr::pivot_longer(cols = -starts_with(c("label",
+                                            "replicate",
+                                            "sample",
+                                            "date",
+                                            "date_time",
+                                            "QC",
+                                            "FAP",
+                                            "In", 
+                                            "Lu")), names_to = "element", values_to = "intensity") %>%
+  dplyr::rename(intstd_1 = Lu.261.541) %>%
+  dplyr::select(-starts_with(c("In.", "Lu"))) %>%
+  tidyr::nest(data = c("intensity_replicate", "intstd_1", "intensity")) %>%
+  mutate(
+    fit = map(data, ~ lm(intensity ~ intstd_1, data = .x)),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied) %>%
+  dplyr::select(-fit)
+```
+
+```{r}
+intercept_1 <-
+  line_1_metrics %>%
+  dplyr::filter(term == "(Intercept)") %>%
+  dplyr::rename(metric = estimate) %>%
+  dplyr::select(label, element, metric, sample, replicate, FAP, QC, date, date_time) %>%
+  dplyr::mutate(term = "intercept_1")
+```
+
+```{r}
+slope_1 <-
+  line_1_metrics %>%
+  dplyr::filter(term == "intstd_1") %>%
+  dplyr::rename(metric = estimate) %>%
+  dplyr::select(label, element, metric, sample, replicate, FAP, QC, date, date_time) %>%
+  dplyr::mutate(term = "slope_1")
+```
+
+```{r}
+intstd_metrics <-
+  data %>%
+  dplyr::select(-normalized, -symbol) %>%
+  tidyr::pivot_wider(names_from = element, values_from = intensity) %>%
+  tidyr::pivot_longer(cols = -starts_with(c("intensity_replicate",
+                                            "replicate",
+                                            "sample",
+                                            "date",
+                                            "date_time",
+                                            "QC",
+                                            "FAP",
+                                            "In",
+                                            "Lu",
+                                            "label")), names_to = "element", values_to = "intensity") %>%
+  dplyr::rename(intstd_1 = Lu.261.541,
+                intstd_2 = In.325.609) %>%
+  dplyr::select(-starts_with(c("In.", "Lu")), -intensity) %>%
+  distinct() %>%
+  tidyr::nest(data = c("intensity_replicate", "intstd_1", "intstd_2")) %>%
+  mutate(
+    fit = map(data, ~ lm(intstd_1 ~ intstd_2, data = .x)),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied)
+```
+
+```{r}
+intercept_2 <-
+  intstd_metrics %>%
+  dplyr::filter(term == "(Intercept)") %>%
+  dplyr::rename(metric = estimate) %>%
+  dplyr::select(label, element, metric, sample, replicate, FAP, QC, date, date_time) %>%
+  dplyr::mutate(term = "intercept_2")
+```
+
+Combine all relevant parameters into one data tibble
+```{r}
+sda_metrics <-
+  intercept_1 %>%
+  dplyr::bind_rows(slope_1, intercept_2) %>%
+  tidyr::pivot_wider(names_from = term, values_from = metric) %>%
+  dplyr::mutate(symbol = str_remove(element, ".[:digit:]+.[:digit:]+")
+  ) %>%
+  dplyr::left_join(dilutions) %>%
+  dplyr::mutate(c_soln = (intercept_1/slope_1) * (c_std/intercept_2),
+                c_sample = c_soln * dil_samp_factor) %>%
+  dplyr::arrange(element, label) %>%
+  dplyr::left_join(RM_info)
+```
+
+Blank analysis
+
+One of the blanks has high Fe. More than likely used wrong solution or severe contamination
+
+```{r dpi = 300}
+data %>%
+  dplyr::select(-intensity) %>%
+  dplyr::filter(element %in% c("Fe.238.204", "In.325.609", "Lu.261.541"),
+                str_detect(label, "blk", negate = FALSE)) %>%
+  dplyr::mutate(replicate = paste("Rep. #", replicate, sep = ""),
+                replicate = fct_inorder(replicate)) %>%
+  ggplot(aes(x = as.numeric(intensity_replicate), y = normalized, fill = element)) +
+  geom_point(alpha = 0.5,
+             shape = 21,
+             size = 1) +
+  scale_fill_viridis_d(option = "turbo", alpha = 0.5) +
+  labs(y = "Normalized intensity",
+       x = "Intensity Replicate",
+       fill = NULL) +
+  facet_grid(date~replicate) +
+  theme_master(base_size = 6) +
+  theme(legend.position = "top")
+```
+
+Determining figures of merit
+```{r}
+FOM <-
+  sda_metrics %>%
+  dplyr::mutate(remove = if_else(
+    sample == "blk" & replicate == 1 & date == "2022-04-07" & symbol == "Fe",
+    "remove",
+    "keep"
+  )) %>%
+  dplyr::filter(sample == "blk",
+                remove == "keep") %>%
+  dplyr::group_by(element) %>%
+  dplyr::summarize(LOQ = 10*sd(c_sample),
+                   LOD = 3*sd(c_sample),
+                   ASDL = 3*sd(c_soln),
+                   ASQL = 10*sd(c_soln),
+                   n = n()) 
+```
+
+Code for data processing
+
+```{r}
+sda_metrics %>%
+  dplyr::mutate(remove = if_else(
+    sample == "blk" & replicate == 1 & date == "2022-04-07" & symbol == "Fe",
+    "remove",
+    "keep"
+  )) %>%
+  dplyr::filter(sample == "blk",
+                remove == "keep") %>%
+  dplyr::group_by(element) %>%
+  dplyr::summarize(LOQ = signif(10*sd(c_sample), 2),
+                   LOD = signif(3*sd(c_sample), 2),
+                   ASDL = signif(3*sd(c_soln), 2),
+                   ASQL = signif(10*sd(c_soln), 2),
+                   n = n()) %>%
+  dplyr::mutate(symbol = str_remove(element, ".[:digit:]+.[:digit:]+"),
+                element = str_replace(element, "[^[:alpha:]]", ""),
+                element = str_replace(element, "[:alpha:]", ""),
+                element = str_replace(element, "[:alpha:]", "")) %>%
+  dplyr::filter(element %in% single_line) %>%
+  dplyr::mutate(element = paste(element, " nm", sep = "")) %>%
+  dplyr::rename(Element = symbol,
+                line = element,
+                `LOQ (mg/kg)` = LOQ,
+                `LOD (mg/kg)` = LOD,
+                `ASDL (mg/kg)` = ASDL,
+                `ASQL (mg/kg)` = ASQL) %>%
+  dplyr::mutate(Element = paste(Element, line, sep = " ")) %>%
+  dplyr::select(Element, `ASDL (mg/kg)`, `ASQL (mg/kg)`, `LOD (mg/kg)`, `LOQ (mg/kg)`) %>%
+  gt()
+```
+
+Joing FOM to data
+```{r}
+data_out <-
+  data %>%
+  dplyr::group_by(label, element) %>%
+  dplyr::summarize(ratio = max(intensity)/min(intensity)) %>%
+  dplyr::ungroup() %>%
+  dplyr::right_join(sda_metrics,
+                    multiple = "all") %>%
+  dplyr::left_join(FOM %>%
+                     dplyr::select(-n)) %>%
+  dplyr::mutate(element = str_replace(element, "[^[:alpha:]]", ""),
+                element = str_replace(element, "[:alpha:]", ""),
+                element = str_replace(element, "[:alpha:]", ""),
+                multiple = "all") %>%
+  dplyr::left_join(FAPs) %>%
+  dplyr::mutate(date = lubridate::ymd(date))
+```
+
+Reference material analysis
+
+Reference material results summary
+```{r}
+ref_mat_summary <-
+  data_out %>%
+  dplyr::filter(QC == "Reference Material") %>%
+  dplyr::mutate(rec = c_sample/certificate_value*100) %>%
+  dplyr::left_join(dry_mass) %>%
+  dplyr::group_by(element, sample, date) %>%
+  dplyr::summarize(symbol = symbol,
+                   mean_conc = mean(c_sample),
+                   sd_conc = sd(c_sample),
+                   mean_conc_soln = mean(c_soln),
+                   sd_conc_soln = sd(c_soln),
+                   c_std = c_std,
+                   n = n(),
+                   certificate_value = certificate_value,
+                   certified = certified,
+                   coverage_factor = coverage_factor,
+                   plus_minus = plus_minus,
+                   mean_rec = mean(rec*dry_mass_correction),
+                   sd_rec = sd(rec*dry_mass_correction),
+                   sigma_2_rec = 2*sd(rec*dry_mass_correction),
+                   dry_mass_correction = dry_mass_correction,
+                   mean_ratio = mean(ratio),
+                   mean_slope = mean(slope_1),
+                   LOQ = LOQ,
+                   LOD = LOD,
+                   ASDL = ASDL,
+                   ASQL = ASQL) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(
+    samp_uncert = (mean_conc * dry_mass_correction * 10)/100, # Set to 10 % nominal uncertainty
+                z_score = (mean_conc * dry_mass_correction - certificate_value)/(sqrt((samp_uncert^2) + ((plus_minus/coverage_factor)^2)))
+  ) %>%
+  dplyr::arrange(element, sample) %>%
+  dplyr::ungroup()
+```
+
+Solution concentrations plotted against certified values
+```{r warning=FALSE, dpi = 300}
+refmat1 <-
+  ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  ggplot(aes(x = certificate_value, y = (mean_conc * dry_mass_correction), fill = symbol, group = 1)) +
+  geom_point(size = 0.5,
+             shape = 21,
+             stroke = 0.2) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              formula = my.formula,
+              linewidth = 0.25,
+              lty = 2,
+              show.legend = FALSE,
+              color = plasma(1, alpha = 0.75, direction = -1, end = 0.8)) +
+  stat_poly_eq(formula = my.formula,
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")),
+               size = rel(2),
+               rr.digits = 3,
+               label.x = 0.175,
+               label.y = 0.945,
+               parse = TRUE) +
+  geom_abline(slope = 1,
+              size = 0.25) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.8) +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(a)", hjust = -0.2, vjust = 1.5) +
+  labs(y = "Found Conc. (mg/kg)",
+       x = "Certified Conc. (mg/kg)",
+       fill = NULL) +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,5,5,0),"pt"))
+
+refmat1
+```
+
+Z score summary
+```{r dpi = 300}
+refmat2 <-
+  ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  ggplot(aes(x = "All Elements", y = z_score, fill = symbol, group = 1)) +
+  geom_hline(yintercept = c(-2,2),
+             size = 0.25) +
+  geom_hline(yintercept = 0,
+             lty = 2,
+             size = 0.25) +
+  geom_quasirandom(size = 0.5,
+                   shape = 21,
+                   stroke = 0.2,
+                   width = 0.25) +
+  geom_boxplot(width = 0.5,
+               lwd = 0.2,
+               show.legend = FALSE,
+               outlier.shape = NA,
+                   fill = "transparent") +
+  scale_fill_viridis_d(alpha = 0.8,
+                     option = "turbo") +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(b)", hjust = -0.2, vjust = 2) +
+  labs(y = "Z Score",
+       x = NULL,
+       fill = NULL) +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,0,0,0),"pt"))
+
+refmat2
+```
+
+```{r dpi = 300}
+refmat3 <-
+  ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  dplyr::group_by(element) %>%
+  dplyr::mutate(n = n(),
+                label = paste(symbol, " (n=", n, ")", sep = "")) %>%
+  ggplot(aes(x = symbol, y = z_score, fill = symbol, group = symbol)) +
+  geom_hline(yintercept = c(-2,2),
+             size = 0.25) +
+  geom_hline(yintercept = 0,
+             lty = 2,
+             size = 0.25) +
+  geom_quasirandom(size = 0.5,
+                   stroke = 0.2,
+                   shape = 21,
+                   width = 0.25) +
+  geom_boxplot(width = 0.5,
+               lwd = 0.2,
+               show.legend = FALSE,
+               outlier.shape = NA,
+               fill = "transparent") +
+  scale_fill_viridis_d(alpha = 0.8,
+                     option = "turbo") +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(c)", hjust = -0.2, vjust = 2) +
+  labs(y = "Z Score",
+       x = NULL,
+       fill = NULL) +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,5,0,0),"pt"))
+
+refmat3
+```
+
+What about variability
+
+```{r dpi = 300}
+refmat4 <-
+  ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  dplyr::mutate(RSD = sd_conc/mean_conc * 100) %>%
+  dplyr::group_by(element) %>%
+  dplyr::mutate(n = n(),
+                label = paste(symbol, " (n=", n, ")", sep = "")) %>%
+  ggplot(aes(x = symbol, y = RSD, fill = symbol , group = symbol)) +
+  geom_quasirandom(size = 0.5,
+                   stroke = 0.2,
+                   shape = 21,
+                   width = 0.25) +
+  geom_boxplot(width = 0.5,
+               lwd = 0.2,
+               show.legend = FALSE,
+               outlier.shape = NA,
+               fill = "transparent") +
+  geom_hline(yintercept = 10,
+             size = 0.25) +
+  scale_fill_viridis_d(alpha = 0.8,
+                     option = "turbo") +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(d)", hjust = -0.2, vjust = 1.5) +
+  labs(y = "RSD (%)",
+       x = NULL,
+       fill = NULL) +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,0,0,0),"pt"))
+
+refmat4
+```
+
+Table format for Z score range. Removing outliers based on 1.5 interquartile range
+```{r}
+ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(IQR = IQR(z_score),
+                percentile_25 = quantile(z_score, 0.25),
+                percentile_75 = quantile(z_score, 0.75),
+                min_threshold = percentile_25 - 1.5*IQR,
+                max_threshold = percentile_75 + 1.5*IQR) %>%
+  #dplyr::filter(z_score >= min_threshold & z_score <= max_threshold) %>%
+  dplyr::summarize(`Z score min` = signif(min(z_score), 2),
+                   `Z score max` = signif(max(z_score), 2),
+                   `Median Z score` = signif(median(z_score), 2),
+                   n = n()) %>%
+  gt()
+
+ref_mat_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                element %in% single_line,
+                !is.na(z_score),
+                certified == "certified",
+                mean_conc_soln/c_std < 10) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(IQR = IQR(z_score),
+                percentile_25 = quantile(z_score, 0.25),
+                percentile_75 = quantile(z_score, 0.75),
+                min_threshold = percentile_25 - 1.5*IQR,
+                max_threshold = percentile_75 + 1.5*IQR) %>%
+  dplyr::filter(z_score >= min_threshold & z_score <= max_threshold) %>%
+  dplyr::summarize(`Z score min` = signif(min(z_score), 2),
+                   `Z score max` = signif(max(z_score), 2),
+                   `Median Z score` = signif(median(z_score), 2),
+                   n = n()) %>%
+  gt()
+```
+
+Code for data vis
+
+```{r warning=FALSE, dpi = 300}
+(refmat1 + refmat2)/(refmat3 + refmat4) 
+```
+
+Fortified analytical portions (FAP)s analysis
+
+Let's do FAP calculations
+```{r}
+sample_metrics <-
+  data_out %>%
+  dplyr::filter(QC == "UAP") %>%
+  dplyr::group_by(element, sample, date) %>%
+  dplyr::summarize(symbol = symbol,
+                   mean_conc = mean(c_sample),
+                   sd_conc = sd(c_sample),
+                   mean_conc_soln = mean(c_soln),
+                   sd_conc_soln = sd(c_soln),
+                   c_std = mean(c_std),
+                   LOQ = LOQ,
+                   LOD = LOD,
+                   ASQL = ASQL,
+                   ASDL = ASDL)
+```
+
+eq 2: *Recovery (%)* $= (\frac{C_{x+s}-C_x}{\frac{C_{s}M_{s}}{M_{x}}})*100$, where $C_{x+s}$, $C_x$, $C_s$, $M_s$, and $M_x$, is the concentration determined in the spiked sample, concentration determined in the unspiked sample, concentration of the spiking solution, mass of the spike solution, mass of the analytical sample portion, respectively
+```{r}
+FAP_replicates <-
+  data_out %>%
+  dplyr::filter(!QC %in% c("Reference Material", "blank", "UAP")) %>%
+  dplyr::left_join(sample_metrics,
+                   multiple = "all") %>%
+  distinct() %>%
+  dplyr::mutate(
+    net_sample = if_else(
+    mean_conc < LOD,
+    c_sample,
+    c_sample - mean_conc
+  ),
+  rec = net_sample/spike_conc*100
+  ) %>%
+  dplyr::arrange(symbol, element, label, FAP)
+```
+
+Summary FAP data
+```{r}
+FAP_replicates_summary <-
+FAP_replicates %>%
+  dplyr::filter(element %in% single_line) %>%
+  dplyr::group_by(element, sample, FAP) %>%
+  dplyr::summarize(mean_rec = mean(rec),
+                   sd_rec = sd(rec),
+                   sigma_2_rec = 2*sd(rec),
+                   n = n(),
+                   mean_c_sample = mean(c_sample),
+                   sd_c_sample = sd(c_sample),
+                   mean_conc = mean_conc,
+                   sd_conc = sd_conc,
+                   mean_spike_soln = mean(spike_conc),
+                   mean_conc_soln = mean(c_soln),
+                   sd_conc_soln = sd(c_soln),
+                   n = n(),
+                   c_std = c_std,
+                   LOD = LOD,
+                   LOQ = LOQ,
+                   ASDL = ASDL,
+                   ASQL = ASQL,
+                   symbol = symbol) %>%
+  distinct() %>%
+  dplyr::ungroup()
+```
+
+We plot results from individual replicates against the fortified concentrations
+```{r warning=FALSE, dpi = 300}
+FAP1 <-
+  FAP_replicates %>%
+  dplyr::filter(element %in% single_line,
+                c_soln > ASQL,
+                c_soln/c_std < 10) %>%
+  dplyr::mutate(n = n(),
+                n = as.character(n)
+                ) %>%
+  ggplot(aes(x = spike_conc, y = net_sample, fill = symbol, group = 1)) +
+  geom_point(size = 0.75,
+             stroke = 0.2,
+             shape = 21) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              formula = my.formula,
+              linewidth = 0.25,
+              lty = 2,
+              show.legend = FALSE,
+              color = plasma(1, alpha = 0.75, direction = -1, end = 0.8)) +
+  stat_poly_eq(formula = my.formula,
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")),
+               size = rel(2),
+               rr.digits = 3,
+               label.x = 0.175,
+               label.y = 0.945,
+               parse = TRUE) +
+  geom_abline(slope = 1,
+              size = 0.25) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.8) +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(a)", hjust = -0.2, vjust = 1.5) +
+  labs(y = "Found Conc. (mg/kg)",
+       x = "Fortified Conc. (mg/kg)",
+       fill = NULL) +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,5,5,0),"pt"))
+
+FAP1
+```
+
+We look at the summary
+```{r, dpi = 300}
+FAP2 <-
+  FAP_replicates_summary %>%
+  dplyr::filter(mean_conc_soln > ASQL,
+                mean_conc_soln/c_std < 10) %>%
+  ggplot(aes(x = "All Elements", y = mean_rec, fill = symbol, group = 1)) +
+  geom_quasirandom(width = 0.25,
+                   stroke = 0.2,
+                   shape = 21,
+                   size = 0.75) +
+  geom_boxplot(outlier.shape = NA,
+               fill = "transparent",
+               show.legend = FALSE,
+               lwd = 0.25,
+               width = 0.5) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.8) +
+  geom_hline(yintercept = 120,
+             linetype = 1,
+             size = 0.25) +
+  geom_hline(yintercept = 80,
+             linetype = 1,
+             size = 0.25) +
+  geom_hline(yintercept = 100,
+             linetype = 2,
+             size = 0.25) +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(b)", hjust = -0.2, vjust = 2) +
+  labs(x = NULL,
+       fill = NULL,
+       shape = NULL,
+       y = "Mean Recovery (%)") +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,0,0,0),"pt"))
+
+FAP2
+```
+
+Recoveries by element
+```{r dpi = 300}
+FAP3 <-
+  FAP_replicates_summary %>%
+  dplyr::filter(mean_conc_soln/c_std < 10,
+                mean_conc_soln > ASQL) %>%
+  dplyr::group_by(element) %>%
+  dplyr::mutate(n = n(),
+                label = paste(symbol, " (n=", n, ")", sep = "")
+                ) %>%
+  ggplot(aes(x = symbol, y = mean_rec, fill = symbol, group = symbol)) +
+  geom_quasirandom(width = 0.25,
+                   stroke = 0.2,
+                   shape = 21,
+                   size = 0.75) +
+  geom_boxplot(outlier.shape = NA,
+               fill = "transparent",
+               show.legend = FALSE,
+               lwd = 0.25,
+               width = 0.5) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.8) +
+  geom_hline(yintercept = 120,
+             linetype = 1,
+             size = 0.25) +
+  geom_hline(yintercept = 80,
+             linetype = 1,
+             size = 0.25) +
+  geom_hline(yintercept = 100,
+             linetype = 2,
+             size = 0.25) +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(c)", hjust = -0.2, vjust = 2) +
+  labs(x = NULL,
+       fill = NULL,
+       shape = NULL,
+       y = "Mean Recovery (%)") +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,5,0,0),"pt"))
+
+FAP3
+```
+
+Variability by element
+```{r dpi = 300}
+FAP4 <-
+  FAP_replicates_summary %>%
+  dplyr::filter(mean_conc_soln/c_std < 10,
+                mean_conc_soln > ASQL) %>%
+  dplyr::group_by(element) %>%
+  dplyr::mutate(n = n(),
+                label = paste(symbol, " (n=", n, ")", sep = "")
+                ) %>%
+  ggplot(aes(x = symbol, y = sd_rec/mean_rec*100, fill = symbol, group = symbol)) +
+  geom_quasirandom(width = 0.25,
+                   stroke = 0.2,
+                   shape = 21,
+                   size = 0.75) +
+  geom_boxplot(outlier.shape = NA,
+               show.legend = FALSE,
+               lwd = 0.25,
+               fill = "transparent",
+               width = 0.5) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.8) +
+  geom_hline(yintercept = 10,
+             linetype = 1,
+             size = 0.25) +
+  guides(shape = guide_legend(override.aes = list(size=2)),
+         fill = "none") +
+  annotate("text", -Inf, Inf, label = "(d)", hjust = -0.2, vjust = 1.5) +
+  labs(x = NULL,
+       fill = NULL,
+       shape = NULL,
+       y = "RSD (%)") +
+  theme_master(base_size = 8) +
+  theme(axis.text.x = element_text(angle = 0),
+        legend.position = "none",
+        panel.grid = element_blank(),
+        plot.margin=unit(c(0,0,0,0),"pt"))
+
+FAP4
+```
+
+Code for data vis
+
+```{r warning=FALSE, dpi = 300}
+(FAP1 + FAP2)/(FAP3 + FAP4)
+```
+
+Table format for FAP recovery range. Removing outliers based on 1.5 interquartile range
+
+```{r}
+FAP_replicates_summary %>%
+  dplyr::filter(mean_conc_soln/c_std < 10,
+                mean_conc_soln > ASQL) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(IQR = IQR(mean_rec),
+                percentile_25 = quantile(mean_rec, 0.25),
+                percentile_75 = quantile(mean_rec, 0.75),
+                min_threshold = percentile_25 - 1.5*IQR,
+                max_threshold = percentile_75 + 1.5*IQR) %>%
+  #dplyr::filter(mean_rec >= min_threshold & mean_rec <= max_threshold) %>%
+  dplyr::summarize(`Recovery min (%)` = signif(min(mean_rec), 2),
+                   `Recovery max (%)` = signif(max(mean_rec), 2),
+                   `Recovery mean (%)` = signif(mean(mean_rec), 2),
+                   `Mean +/- 2sigma (%)` = paste(signif(mean(mean_rec), 2), " +/- ", signif(2*sd(mean_rec), 2)),
+                   n = n()) %>%
+  gt()
+
+FAP_replicates_summary %>%
+  dplyr::filter(mean_conc_soln/c_std < 10,
+                mean_conc_soln > ASQL) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(IQR = IQR(mean_rec),
+                percentile_25 = quantile(mean_rec, 0.25),
+                percentile_75 = quantile(mean_rec, 0.75),
+                min_threshold = percentile_25 - 1.5*IQR,
+                max_threshold = percentile_75 + 1.5*IQR) %>%
+  dplyr::filter(mean_rec >= min_threshold & mean_rec <= max_threshold) %>%
+  dplyr::summarize(`Recovery min (%)` = signif(min(mean_rec), 2),
+                   `Recovery max (%)` = signif(max(mean_rec), 2),
+                   `Recovery mean (%)` = signif(mean(mean_rec), 2),
+                   `Mean +/- 2sigma (%)` = paste(signif(mean(mean_rec), 2), " +/- ", signif(2*sd(mean_rec), 2)),
+                   n = n()) %>%
+  gt()
+```
+
+Determining automatic SDA working range
+
+```{r}
+metrics_paramters <-
+  sda_metrics %>%
+  dplyr::filter(QC == "Reference Material") %>%
+  dplyr::mutate(date = lubridate::ymd(date),
+                element = str_replace(element, "[^[:alpha:]]", ""),
+                element = str_replace(element, "[:alpha:]", ""),
+                element = str_replace(element, "[:alpha:]", "")) %>%
+  dplyr::bind_rows(
+    FAP_replicates
+  ) %>%
+  dplyr::left_join(dry_mass) %>%
+  dplyr::mutate(
+    rec = if_else(QC == "Reference Material",
+                  (c_sample*dry_mass_correction)/certificate_value * 100,
+                  rec)
+  ) %>%
+  dplyr::group_by(date, sample, symbol, element) %>%
+  dplyr::summarize(
+    mean_rec = mean(rec),
+    sd_rec = sd(rec),
+    mean_c_sample = mean(c_sample),
+    sd_c_sample = sd(c_sample),
+    mean_c_soln = mean(c_soln),
+    sd_c_soln = sd(c_soln),
+    c_std = mean(c_std),
+    mean_slope = mean(slope_1),
+    mean_intercept = mean(intercept_1),
+    n = n()
+  ) %>%
+  dplyr::left_join(
+    FOM %>%
+  dplyr::mutate(element = str_replace(element, "[^[:alpha:]]", ""),
+                element = str_replace(element, "[:alpha:]", ""),
+                element = str_replace(element, "[:alpha:]", "")) %>%
+    dplyr::select(-n),
+  by = "element"
+  ) %>%
+  dplyr::mutate(ratio = mean_c_soln/c_std) %>%
+  tidyr::pivot_longer(cols = c(ratio, mean_intercept, mean_slope),
+                      names_to = "metric",
+                      values_to = "value") %>%
+  dplyr::mutate(rec_factor = if_else(
+    mean_rec >= 80 & mean_rec <= 120,
+    "accept",
+    "decline"
+  ))
+```
+
+```{r warning=FALSE, dpi = 300}
+metrics1 <-
+  metrics_paramters %>%
+  dplyr::filter(element %in% single_line,
+                mean_c_soln > ASQL) %>%
+  tidyr::pivot_wider(names_from = "metric",
+                     values_from = "value") %>%
+  ggplot(aes(mean_slope, mean_rec, fill = rec_factor, shape = rec_factor, size = rec_factor)) +
+  geom_point(stroke = 0.15) +
+  geom_linerange(aes(ymax = mean_rec + sd_rec,
+                     ymin = mean_rec - sd_rec),
+                 size = 0.15) +
+  scale_shape_manual(values = c(21,22)) +
+  scale_size_manual(values=c(1, 1.4)) +
+  coord_cartesian(ylim = c(60, 160)) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.5,
+                       begin = 0.1,
+                       end = 0.75) +
+  geom_hline(yintercept = c(80, 120),
+             size = 0.25) +
+  geom_hline(yintercept = 100,
+             lty = 2,
+             size = 0.25) +
+  labs(y = "Mean Recovery +/- Stdev. (%)",
+       x = expression(italic("Slope")),
+       subtitle = "(d)",
+       size = NULL,
+       shape = NULL,
+       color = NULL,
+       fill = NULL) +
+  theme_master(base_size = 9) +
+  theme(legend.position = "none",
+        panel.grid = element_blank())
+
+metrics1
+```
+
+```{r warning=FALSE, dpi = 300}
+metrics2 <-
+  metrics_paramters %>%
+  dplyr::filter(element %in% single_line,
+                mean_c_soln > ASQL) %>%
+  tidyr::pivot_wider(names_from = "metric",
+                     values_from = "value") %>%
+  ggplot(aes(mean_intercept, mean_rec, fill = rec_factor, shape = rec_factor, size = rec_factor)) +
+  geom_point(stroke = 0.15) +
+  coord_cartesian(ylim = c(60, 160)) +
+  geom_linerange(aes(ymax = mean_rec + sd_rec,
+                     ymin = mean_rec - sd_rec),
+                 size = 0.15) +
+  scale_size_manual(values=c(1, 1.4)) +
+  scale_shape_manual(values = c(21,22)) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.5,
+                       begin = 0.1,
+                       end = 0.75) +
+  geom_hline(yintercept = c(80, 120),
+             size = 0.25) +
+  geom_hline(yintercept = 100,
+             lty = 2,
+             size = 0.25) +
+  scale_x_log10() +
+  labs(y = "Mean Recovery +/- Stdev. (%)",
+       x = expression(italic("Intercept")*" ("*Log[10]*" Scale)"),
+       subtitle = "(c)",
+       size = NULL,
+       shape = NULL,
+       fill = NULL) +
+  theme_master(base_size = 9) +
+  theme(legend.position = "none",
+        panel.grid = element_blank())
+
+metrics2
+```
+
+```{r warning=FALSE, dpi = 300}
+metrics3 <-
+  metrics_paramters %>%
+  dplyr::filter(element %in% single_line,
+                mean_c_soln > ASQL) %>%
+  tidyr::pivot_wider(names_from = "metric",
+                     values_from = "value") %>%
+  ggplot(aes(ratio, mean_rec, fill = rec_factor, shape = rec_factor, size = rec_factor)) +
+  geom_point(stroke = 0.25) +
+  coord_cartesian(ylim = c(60, 160)) +
+  scale_shape_manual(values = c(21,22)) +
+  geom_linerange(aes(ymax = mean_rec + sd_rec,
+                     ymin = mean_rec - sd_rec),
+                 size = 0.15) +
+  scale_size_manual(values=c(1, 1.4),
+             labels = percent) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.5,
+                       begin = 0.1,
+                       end = 0.75) +
+  geom_hline(yintercept = c(80, 120),
+             size = 0.25) +
+  geom_hline(yintercept = 100,
+             lty = 2,
+             size = 0.25) +
+  annotate("text", -Inf, Inf, label = "(a)", hjust = -0.2, vjust = 1.5) +
+  labs(y = "Mean Recovery +/- Stdev. (%)",
+       x = NULL,
+       size = NULL,
+       shape = NULL,
+       fill = NULL) +
+  theme_master(base_size = 12) +
+  theme(legend.position = "none",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        plot.margin=unit(c(0,0,5,0),"pt"))
+
+metrics3
+```
+
+```{r warning=FALSE, dpi = 300}
+metrics4 <-
+  metrics_paramters %>%
+  dplyr::filter(element %in% single_line,
+                mean_c_soln > ASQL) %>%
+  tidyr::pivot_wider(names_from = "metric",
+                     values_from = "value") %>%
+  ggplot(aes(ratio, mean_rec, fill = rec_factor, shape = rec_factor, size = rec_factor)) +
+  geom_point(stroke = 0.25) +
+  geom_linerange(aes(ymax = mean_rec + sd_rec,
+                     ymin = mean_rec - sd_rec),
+                 size = 0.15) +
+  scale_size_manual(values=c(1, 1.4)) +
+  scale_shape_manual(values = c(21,22)) +
+  scale_fill_viridis_d(option = "turbo",
+                       alpha = 0.5,
+                       begin = 0.1,
+                       end = 0.75) +
+  geom_hline(yintercept = c(80, 120),
+             size = 0.15) +
+  geom_hline(yintercept = 100,
+             lty = 2,
+             size = 0.15) +
+  coord_cartesian(xlim = c(0, 1),
+                  ylim = c(60, 140),
+                  expand = FALSE) +
+  scale_y_continuous(breaks = seq(60, 140, 40)) +
+  annotate("text", -Inf, Inf, label = "(b)", hjust = -0.2, vjust = 1.5) +
+  labs(y = "Mean Recovery +/- Stdev. (%)",
+       x = expression("Soln. Conc./Std. Conc."),
+       shape = NULL,
+       size = NULL,
+       fill = NULL) +
+  theme_master(base_size = 12) +
+  theme(legend.position = "none",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        plot.margin=unit(c(0,0,0,0),"pt"))
+
+metrics4
+```
+
+Code for data vis
+
+Edit according to peer reviewer
+
+```{r warning=FALSE, dpi = 300}
+result <- metrics3/metrics4
+gt <- patchwork::patchworkGrob(result)
+
+plot_for_save <-
+  gridExtra::grid.arrange(gt, left = "Mean Recovery +/- Stdev. (%)", bottom = "Soln. Conc./Std. Conc.")
+```
+
+Code for data vis
+
+```{r dpi = 300}
+data %>%
+  dplyr::select(-intensity) %>%
+  dplyr::filter(element %in% c("Zn.202.548", "In.325.609", "Lu.261.541"),
+                str_detect(label, "1566b|1577c|veg-oil-FAP1", negate = FALSE)) %>%
+  dplyr::mutate(replicate = paste("Rep. #", replicate, sep = ""),
+                replicate = fct_inorder(replicate),
+                dig_label = str_replace(date, "2022-02-01", "Dig. 1"),
+                dig_label = str_replace(dig_label, "2022-03-09", "Dig. 2"),
+                dig_label = str_replace(dig_label, "2022-04-07", "Dig. 3"),
+                element = str_replace(element, "In.", "In "),
+                element = str_replace(element, "Lu.", "Lu "),
+                element = str_replace(element, "Zn.", "Zn "),
+                element = paste(element, "(nm)")
+                ) %>%
+  dplyr::filter(dig_label == "Dig. 2",
+                replicate == "Rep. #1") %>%
+  ggplot(aes(x = as.numeric(intensity_replicate), y = normalized, fill = element, shape = element)) +
+  geom_point(size = 1,
+             stroke = 0.1) +
+  scale_shape_manual(values = c(21,22,23)) +
+  annotate("text", x = 50.5, y = 0.85, label = "NIST 1566b", size = 1.5) +
+  annotate("text", x = 50.5, y = 0.52, label = "NIST 1577c", size = 1.5) +
+  annotate("text", x = 50.5, y = 0.055, label = "Veg. Oil FAP", size = 1.5) +
+  annotate("rect", xmin = 24.5, xmax = 43.5, ymin = 0, ymax = 1,
+           alpha = .25,fill = "gray") +
+  annotate("rect", xmin = 58.5, xmax = 77.5, ymin = 0, ymax = 1,
+           alpha = .25,fill = "gray") +
+  annotate("rect", xmin = 94.5, xmax = 100.5, ymin = 0, ymax = 1,
+           alpha = .25,fill = "gray") +
+  annotate("segment", x = 18, xend = 25, y = 0.5, yend = 0.5, size = 0.25,) +
+  annotate("text", x = 10, y = 0.505, label = "SDA region", size = 2) +
+  scale_fill_viridis_d(option = "turbo", alpha = 0.5) +
+  guides(fill = guide_legend(override.aes = list(size=2))) +
+  #geom_hline(yintercept = 0.75) +
+  labs(y = "Normalized Intensity",
+       x = "Intensity Replicate",
+       fill = NULL,
+       shape = NULL) +
+  theme_master(base_size = 8) +
+  theme(legend.position = "top",
+        panel.grid = element_blank(),
+        legend.title=element_blank(),
+      legend.margin = margin(0, 0, 0, 0),
+      legend.spacing.x = unit(0, "mm"),
+      legend.spacing.y = unit(0, "mm"),
+      plot.margin=unit(c(0,0,0,0),"pt"))
+```
+
+```{r}
+working_range <-
+  ref_mat_summary %>%
+  dplyr::filter(element %in% single_line,
+                mean_conc_soln > ASQL) %>%
+  dplyr::select(element,
+                symbol,
+                sample,
+                mean_conc,
+                sd_conc,
+                mean_rec,
+                sd_rec,
+                sigma_2_rec,
+                mean_conc_soln,
+                c_std,
+                LOD,
+                LOQ,
+                ASDL,
+                ASQL) %>%
+  dplyr::rename(mean_c_sample = mean_conc,
+                sd_c_sample = sd_conc) %>%
+  dplyr::mutate(QC = "Reference Material") %>%
+  dplyr::bind_rows(
+    FAP_replicates_summary %>%
+      dplyr::filter(mean_conc_soln > ASQL) %>%
+  dplyr::select(element,
+                symbol,
+                sample,
+                mean_c_sample,
+                mean_rec,
+                sd_rec,
+                sigma_2_rec,
+                mean_conc_soln,
+                c_std,
+                LOD,
+                LOQ,
+                ASDL,
+                ASQL) %>%
+  dplyr::mutate(QC = "Fortified Sample")
+  ) %>%
+  dplyr::filter(!is.na(mean_rec)) %>%
+  dplyr::mutate(range = if_else(
+                  mean_rec >= 80 & mean_rec <= 120,
+                  "inside",
+                  "outside"
+                )) %>%
+  dplyr::group_by(symbol, range) %>%
+  dplyr::mutate(min_range = signif(min(mean_conc_soln/c_std), 2),
+                max_range = signif(max(mean_conc_soln/c_std), 2)
+                ) %>%
+  dplyr::ungroup()
+```
+
+Code for data processing
+
+```{r}
+range <-
+  working_range %>%
+  dplyr::select(symbol, range, min_range, max_range) %>%
+  dplyr::filter(range == "inside") %>%
+  dplyr::select(symbol, min_range, max_range) %>%
+  dplyr::distinct()
+
+dilutions %>%
+  dplyr::select(symbol, c_std) %>%
+  dplyr::filter(symbol %in% data_out$symbol) %>%
+  dplyr::distinct() %>%
+  dplyr::slice_head(n = 10) %>% # duplicates each entry so remove the first set of values
+  dplyr::right_join(range) %>%
+  dplyr::mutate(min_soln_conc = signif(c_std * min_range, 2),
+                max_conc_soln = signif(c_std * max_range, 2),
+                min_samp_conc = signif(c_std * min_range*200, 2),
+                max_samp_con = signif(c_std * max_range*200, 2),
+                c_std = signif(c_std, 2)
+  ) %>%
+  dplyr::rename(min_ratio = min_range,
+                max_ratio = max_range) %>%
+  gt()
+```
+
+Code for data processing
+
+```{r}
+ref_mat_summary %>%
+  dplyr::filter(element %in% single_line) %>%
+  dplyr::mutate(across(-c("symbol", "certificate_value", "plus_minus", "sample", "element", "date", "certified"), ~signif(., digits = 3))) %>%
+  dplyr::mutate(FOM = if_else(
+    mean_conc_soln > ASQL,
+    "",
+    if_else(
+      mean_conc_soln <= ASQL & mean_conc_soln > ASDL,
+      "Trace",
+      "< LOD"
+    )
+  ),
+  `RSD (%)` = signif(sd_conc/mean_conc*100, digits = 3)) %>%
+  dplyr::select(symbol, element, sample, certified, FOM, mean_conc, sd_conc, `RSD (%)`, c_std, n, z_score, certificate_value, plus_minus, mean_conc_soln, sd_conc_soln, ASDL, ASQL, LOD, LOQ) %>%
+  dplyr::arrange(symbol, sample) %>%
+  dplyr::rename(`Wavelength (nm)` = element,
+                Element = symbol,
+                Certificate = certified,
+                `Z Score` = z_score,
+                `Standard Concentration (mg/kg)` = c_std,
+                `Certificate Value (mg/kg)` = certificate_value,
+                `Certificate Uncertainty (mg/kg)` = plus_minus,
+                `Reference Material` = sample,
+                `Figure of Merit Indicator` = FOM,
+                `Conc. Mean (mg/kg)` = mean_conc,
+                `Conc. Stdev. (mg/kg)` = sd_conc,
+                `Soln. Conc. Mean (mg/kg)` = mean_conc_soln,
+                `Soln. Conc. Stdev. (mg/kg)` = sd_conc_soln,
+                `Analytical Solution Detection Limit (ASDL)` = ASDL,
+                `Analytical Solution Quantitation Limit (ASQL)` = ASQL,
+                `Limit of Detection (LOD)` = LOD,
+                `Limit of Quantitation (LOQ)` = LOQ
+                )
+```
+
+Code for data processing
+
+```{r}
+FAP_replicates_summary %>%
+  dplyr::mutate(across(-c("symbol", "sample", "element", "FAP"), ~signif(., digits = 3))) %>%
+  dplyr::mutate(FOM = if_else(
+    mean_conc_soln > ASQL,
+    "",
+    if_else(
+      mean_conc_soln <= ASQL & mean_conc_soln > ASDL,
+      "Trace",
+      "< LOD"
+    )
+  ),
+  `RSD (%)` = signif(sd_rec/mean_rec*100, digits = 3)) %>%
+  dplyr::select(symbol, element, sample, FAP, FOM, mean_rec, sd_rec, `RSD (%)`, c_std, n, mean_conc, sd_conc, mean_conc_soln, sd_conc_soln, mean_spike_soln, ASDL, ASQL, LOD, LOQ) %>%
+  dplyr::arrange(symbol, sample, FAP) %>%
+  dplyr::mutate(FAP = str_replace(FAP, "FAP1", "Level 1"),
+                FAP = str_replace(FAP, "FAP2", "Level 2"),
+                FAP = str_replace(FAP, "FAP3", "Level 3"),
+                FAP = factor(FAP, levels = c("Level 1", "Level 2", "Level 3")),
+                sample = str_replace(sample, "breaded-chicken", "Breaded Chicken"),
+                sample = str_replace(sample, "corn-flakes", "Corn Flakes"),
+                sample = str_replace(sample, "italian-dressing", "Italian Dressing"),
+                sample = str_replace(sample, "veg-oil", "Vegetable Oil")) %>%
+  dplyr::rename(`Wavelength (nm)` = element,
+                Element = symbol,
+                Sample = sample,
+                `Standard Concentration (mg/kg)` = c_std,
+                `Fortified Analytical Portion (FAP) Level` = FAP,
+                `Figure of Merit Indicator` = FOM,
+                `Recovery Mean (%)` = mean_rec,
+                `Recovery Stdev. (%)` = sd_rec,
+                `Native Conc. Mean (mg/kg)` = mean_conc,
+                `Native Conc. Stdev. (mg/kg)` = sd_conc,
+                `Soln. Conc. Mean (mg/kg)` = mean_conc_soln,
+                `Soln. Conc. Stdev. (mg/kg)` = sd_conc_soln,
+                `Spike Conc. (mg/kg)` = mean_spike_soln,
+                `Analytical Solution Detection Limit (ASDL)` = ASDL,
+                `Analytical Solution Quantitation Limit (ASQL)` = ASQL,
+                `Limit of Detection (LOD)` = LOD,
+                `Limit of Quantitation (LOQ)` = LOQ
+                )
+```
+
+Time saved
+
+```{r}
+analysis_time <-
+  data_out %>%
+  dplyr::mutate(date_time = mdy_hms(date_time)) %>%
+  dplyr::arrange(date_time) %>%
+  dplyr::distinct(label, date_time)
+
+analysis_time
+```
+
+Total number of solutions analyzed in one batch
+```{r}
+nrow(analysis_time)
+```
+
+The total time in hours to run 120 solutions
+```{r}
+time_length(
+  interval(
+    analysis_time %>%
+           dplyr::slice(1) %>%
+           dplyr::pull(date_time),
+         analysis_time %>%
+           dplyr::slice(120) %>%
+           dplyr::pull(date_time)
+         ),
+  unit = "hour"
+)
+```
+
+And what is the time in minutes between two successive solutions
+```{r}
+time_length(
+  interval(analysis_time %>%
+           dplyr::slice(1) %>%
+           dplyr::pull(date_time),
+         analysis_time %>%
+           dplyr::slice(2) %>%
+           dplyr::pull(date_time)
+         ),
+  unit = "minute"
+)
+
+time_length(
+  interval(analysis_time %>%
+           dplyr::slice(59) %>%
+           dplyr::pull(date_time),
+         analysis_time %>%
+           dplyr::slice(60) %>%
+           dplyr::pull(date_time)
+         ),
+  unit = "minute"
+)
+
+time_length(
+  interval(analysis_time %>%
+           dplyr::slice(119) %>%
+           dplyr::pull(date_time),
+         analysis_time %>%
+           dplyr::slice(120) %>%
+           dplyr::pull(date_time)
+         ),
+  unit = "minute"
+)
+```
+
+References
+
+1. J. T. Sloop, H. J. B. Bonilla, T. Harville, B. T. Jones and G. L. Donati, *Talanta*, 2019, **205**, 120160.
+
+Packages and system information
+
+```{r}
+sessionInfo()
+```
